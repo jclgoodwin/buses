@@ -24,6 +24,9 @@ def get_datetime(string):
 
 
 def get_point(element, atco_code):
+    if element is None:
+        return
+
     easting = element.findtext("Easting")
     northing = element.findtext("Northing")
     grid_type = element.findtext("GridType")
@@ -48,38 +51,87 @@ def get_point(element, atco_code):
         return GEOSGeometry(f"POINT({lon} {lat})")
 
 
-class Command(BaseCommand):
-    mapping = (
-        ("Descriptor/CommonName", "common_name"),
-        ("Descriptor/Landmark", "landmark"),
-        ("Descriptor/Street", "street"),
-        ("Descriptor/Indicator", "indicator"),
-        ("Descriptor/Crossing", "crossing"),
-        ("Place/Suburb", "suburb"),
-        ("Place/Town", "town"),
-        ("StopClassification/StopType", "stop_type"),
-        ("StopClassification/OnStreet/Bus/BusStopType", "bus_stop_type"),
-        ("StopClassification/OnStreet/Bus/TimingStatus", "timing_status"),
+mapping = (
+    ("Descriptor/CommonName", "common_name"),
+    ("Descriptor/Landmark", "landmark"),
+    ("Descriptor/Street", "street"),
+    ("Descriptor/Indicator", "indicator"),
+    ("Descriptor/Crossing", "crossing"),
+    ("Place/Suburb", "suburb"),
+    ("Place/Town", "town"),
+    ("StopClassification/StopType", "stop_type"),
+    ("StopClassification/OnStreet/Bus/BusStopType", "bus_stop_type"),
+    ("StopClassification/OnStreet/Bus/TimingStatus", "timing_status"),
+)
+
+# dumb placeholders in the data that should be blank
+nothings = {
+    "-",
+    "--",
+    "---",
+    "Crossing not known",
+    "Street not known",
+    "Landmark not known",
+    "Unknown",
+    "*",
+    "Data Unavailable",
+    "N/A",
+    "Tba",
+    "type_undefined",
+    "class_undefined",
+}
+
+
+def get_stop(element, atco_code):
+    point = get_point(element.find("Place/Location"), atco_code)
+
+    bearing = element.findtext(
+        "StopClassification/OnStreet/Bus/MarkedPoint/Bearing/CompassPoint"
+    )
+    if bearing is None:
+        bearing = element.findtext(
+            "StopClassification/OnStreet/Bus/UnmarkedPoint/Bearing/CompassPoint"
+        )
+    if bearing is None:
+        bearing = ""
+
+    stop = StopPoint(
+        atco_code=atco_code,
+        naptan_code=element.findtext("NaptanCode") or element.findtext("PlateCode"),
+        latlong=point,
+        bearing=bearing,
+        active=element.attrib.get("Status", "active") == "active",
     )
 
-    # dumb placeholders in the data that should be blank
-    nothings = {
-        "-",
-        "--",
-        "---",
-        "Crossing not known",
-        "Street not known",
-        "Landmark not known",
-        "Unknown",
-        "*",
-        "Data Unavailable",
-        "N/A",
-        "Tba",
-        "type_undefined",
-        "class_undefined",
-    }
+    for xml_path, key in mapping:
+        value = element.findtext(xml_path, "")
+        if value in nothings:
+            value = ""
+        setattr(stop, key, value)
 
-    def get_stop(self, element):
+        if stop.indicator == stop.naptan_code:
+            stop.indicator = ""
+
+    return stop
+
+
+def get_stop_area(element):
+    stop_area_code = element.findtext("StopAreaCode")
+
+    point = get_point(element.find("Location"), stop_area_code)
+
+    return StopArea(
+        id=stop_area_code,
+        name=element.findtext("Name"),
+        latlong=point,
+        active=element.attrib.get("Status", "active") == "active",
+        admin_area_id=element.findtext("AdministrativeAreaRef"),
+        stop_area_type=element.findtext("StopAreaType"),
+    )
+
+
+class Command(BaseCommand):
+    def handle_stop(self, element):
         atco_code = element.findtext("AtcoCode")
 
         modified_at = get_datetime(element.attrib.get("ModificationDateTime"))
@@ -100,57 +152,28 @@ class Command(BaseCommand):
         ):
             return
 
-        created_at = get_datetime(element.attrib["CreationDateTime"])
+        stop = get_stop(element, atco_code)
 
-        point = get_point(element.find("Place/Location"), atco_code)
-
-        bearing = element.findtext(
-            "StopClassification/OnStreet/Bus/MarkedPoint/Bearing/CompassPoint"
-        )
-        if bearing is None:
-            bearing = element.findtext(
-                "StopClassification/OnStreet/Bus/UnmarkedPoint/Bearing/CompassPoint"
-            )
-        if bearing is None:
-            bearing = ""
+        stop.created_at = get_datetime(element.attrib["CreationDateTime"])
+        stop.modified_at = modified_at
+        stop.source = self.source
 
         # a stop can be in multiple stop areas
         # we assume (dubiously) that it has no more than 1 active one
-        stop_area = None
         for stop_area_ref in element.findall("StopAreas/StopAreaRef"):
             if stop_area_ref.attrib.get("Modification") != "delete":
-                stop_area = stop_area_ref.text
+                stop.stop_area_id = stop_area_ref.text
+                # break
 
-        stop = StopPoint(
-            atco_code=atco_code,
-            naptan_code=element.findtext("NaptanCode") or element.findtext("PlateCode"),
-            created_at=created_at,
-            modified_at=modified_at,
-            latlong=point,
-            bearing=bearing,
-            locality_id=element.findtext("Place/NptgLocalityRef"),
-            admin_area_id=element.findtext("AdministrativeAreaRef"),
-            stop_area_id=stop_area,
-            active=element.attrib.get("Status", "active") == "active",
-            source=self.source,
-        )
-
+        stop.locality_id = element.findtext("Place/NptgLocalityRef")
         if stop.locality_id and stop.locality_id not in self.localities:
             logger.warning("%s locality %s does not exist", atco_code, stop.locality_id)
             stop.locality_id = None
 
+        stop.admin_area_id = element.findtext("AdministrativeAreaRef")
         if atco_code.startswith(stop.admin_area_id):
             stop.admin_area = self.admin_areas.get(stop.admin_area_id)
             logger.info(f"{atco_code} {stop.admin_area}")
-
-        for xml_path, key in self.mapping:
-            value = element.findtext(xml_path, "")
-            if value in self.nothings:
-                value = ""
-            setattr(stop, key, value)
-
-        if stop.indicator == stop.naptan_code:
-            stop.indicator = ""
 
         if atco_code in self.overrides:
             for key, value in self.overrides[atco_code].items():
@@ -162,20 +185,6 @@ class Command(BaseCommand):
             self.stops_to_update.append(stop)
         else:
             self.stops_to_create.append(stop)
-
-    def get_stop_area(self, element):
-        stop_area_code = element.findtext("StopAreaCode")
-
-        point = get_point(element.find("Location"), stop_area_code)
-
-        return StopArea(
-            id=stop_area_code,
-            name=element.findtext("Name"),
-            latlong=point,
-            active=element.attrib.get("Status", "active") == "active",
-            admin_area_id=element.findtext("AdministrativeAreaRef"),
-            stop_area_type=element.findtext("StopAreaType"),
-        )
 
     bulk_update_fields = [
         "created_at",
@@ -315,12 +324,12 @@ class Command(BaseCommand):
                         .in_bulk()
                     )
 
-                self.get_stop(element)
+                self.handle_stop(element)
 
                 element.clear()  # save memory
 
             elif element.tag == "StopArea":
-                stop_area = self.get_stop_area(element)
+                stop_area = get_stop_area(element)
                 self.stop_areas[stop_area.id] = stop_area
                 element.clear()
 

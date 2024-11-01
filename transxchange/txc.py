@@ -36,6 +36,8 @@ class Stop:
 
         self.locality = element.findtext("LocalityName")
 
+        self.element = element
+
     def __str__(self):
         name = self.common_name
         if not name:
