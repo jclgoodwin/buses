@@ -60,5 +60,10 @@
 '6700713414':
     latlong: POINT(-4.064315804540854 57.54041278738674)
 
+#Oadby Coppice Hall
 '260016604':
     latlong: POINT(-1.086786 52.609883)
+
+#Durham Bus Station
+'13005528L':
+    latlong: POINT(-1.581721 54.777160)
