@@ -59,6 +59,8 @@ class Command(BaseCommand):
 
         feed = feed.restrict_to_routes(
             feed.routes[feed.routes.route_id.str.startswith("UK")].route_id
+            feed.routes[feed.routes.route_long_name.str.startswith("London")].route_long_name
+            feed.routes[feed.routes.route_long_name.str.endswith("London")].route_long_name
         )
 
         stops_data = {row.stop_id: row for row in feed.stops.itertuples()}
